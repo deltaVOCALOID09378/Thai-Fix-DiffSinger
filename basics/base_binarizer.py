@@ -16,6 +16,7 @@ import warnings
 import gc
 from copy import deepcopy
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -237,15 +238,16 @@ class BaseBinarizer:
 
         xs = [display_phoneme(k) for k in keys]
         ys = [ph_count_map[k] for k in keys]
-        plt = distribution_to_figure(
+        fig = distribution_to_figure(
             title='Phoneme Distribution Summary',
             x_label='Phoneme', y_label='Number of occurrences',
             items=xs, values=ys, rotate=len(self.dictionaries) > 1
         )
         filename = self.binary_data_dir / 'phoneme_distribution.jpg'
-        plt.savefig(fname=filename,
+        fig.savefig(fname=filename,
                     bbox_inches='tight',
                     pad_inches=0.25)
+        plt.close(fig)  # pyplot keeps a reference to every open figure until it is closed
         print(f'| save summary to \'{filename}\'')
 
         if ph_idx_occurred != ph_idx_required:

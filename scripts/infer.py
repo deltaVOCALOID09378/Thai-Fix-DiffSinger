@@ -227,7 +227,7 @@ def acoustic(
     try:
         infer_ins.run_inference(
             params, out_dir=out, title=name, num_runs=num,
-            spk_mix=spk_mix, seed=seed, save_mel=mel
+            seed=seed, save_mel=mel
         )
         print(f'| [SUCCESS] Acoustic inference completed successfully (การประมวลผลเนื้อเสียงสำเร็จเรียบร้อย)')
     except KeyboardInterrupt:

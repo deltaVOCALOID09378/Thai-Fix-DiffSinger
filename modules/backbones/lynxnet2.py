@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.commons.common_layers import (
-    SinusoidalPosEmb, SwiGLU, ATanGLU, SoftSignGLU, Transpose, AdamWLinear
+    SinusoidalPosEmb, SwiGLU, ATanGLU, SoftSignGLU, Transpose, AdamWLinear,
+    NHWCConv1d, default_conv_weight_init
 )
 from modules.commons.common_layers import MixedPrecisionLayerNorm as LayerNorm
 from utils.hparams import hparams
@@ -25,10 +26,12 @@ class LYNXNet2Block(nn.Module):
             _dropout = nn.Dropout(dropout)
         else:
             _dropout = nn.Identity()
+        _dwconv = NHWCConv1d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2,
+                             groups=dim, init_method=default_conv_weight_init)
         self.net = nn.Sequential(
             LayerNorm(dim),
             Transpose((1, 2)),
-            nn.Conv1d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim),
+            _dwconv,
             Transpose((1, 2)),
             nn.Linear(dim, inner_dim * 2),
             _glu,
@@ -76,13 +79,13 @@ class LYNXNet2(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        self.norm = LayerNorm(num_channels)
+        self.norm = nn.LayerNorm(num_channels)
         self.output_projection = AdamWLinear(num_channels, in_dims * n_feats)
         nn.init.kaiming_normal_(self.input_projection.weight)
         nn.init.kaiming_normal_(self.conditioner_projection.weight)
         nn.init.zeros_(self.output_projection.weight)
 
-    def forward(self, spec, diffusion_step, cond):
+    def forward(self, spec, diffusion_step, cond, diffusion_step_2=None, mask=None):
         """
         :param spec: [B, F, M, T]
         :param diffusion_step: [B, 1]
@@ -100,7 +103,18 @@ class LYNXNet2(nn.Module):
             x = x + self.conditioner_projection(cond).transpose(1, 2)
         else:
             x = x + self.conditioner_projection(cond.transpose(1, 2))
-        x = x + self.diffusion_embedding(diffusion_step).unsqueeze(1)
+        
+        if mask is not None:
+            step = torch.cat((diffusion_step, diffusion_step_2), dim=0)
+            step = self.diffusion_embedding(step)
+            step, step_2 = torch.split(step, x.shape[0], dim=0) #[B, 1, C]
+            mask = mask.to(x).unsqueeze(-1) # [B, T, 1]
+            x = x + step + (step_2 - step) * mask
+        else:
+            step = self.diffusion_embedding(diffusion_step)
+            if step.dim() == 2:
+                step = step.unsqueeze(1)
+            x = x + step
 
         for layer in self.residual_layers:
             x = layer(x)

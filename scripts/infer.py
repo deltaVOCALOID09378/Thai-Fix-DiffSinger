@@ -1,7 +1,18 @@
+# ==============================================================================
+# Date: 25/10/2026 (พ.ศ. 2569)
+# File Name: infer_2.py
+# Version: 1.2
+# Location: Root Directory / Scripts
+# Credit: Made And Checked By DELTA SYNTH & All Code Agentic AI Engine
+#         Original by DiffSinger Project
+# Description: อัปเกรดระบบแจ้งเตือนสองภาษา, ดักจับข้อผิดพลาด, และคืนค่า VRAM หลังจบการอนุมาน
+# ==============================================================================
 import json
 import os
 import pathlib
 import sys
+import traceback
+import gc
 from collections import OrderedDict
 from pathlib import Path
 
@@ -19,16 +30,16 @@ def find_exp(exp):
             if not subdir.is_dir():
                 continue
             if subdir.name.startswith(exp):
-                print(f'| match ckpt by prefix: {subdir.name}')
+                print(f'| [INFO] Match ckpt by prefix (พบโมเดลจากคำนำหน้า): {subdir.name}')
                 exp = subdir.name
                 break
         else:
             raise click.BadParameter(
-                f'There are no matching exp starting with \'{exp}\' in \'checkpoints\' folder. '
-                'Please specify \'--exp\' as the folder name or prefix.'
+                f'| [ERROR] There are no matching exp starting with \'{exp}\' in \'checkpoints\' folder. '
+                'Please specify \'--exp\' as the folder name or prefix. (ไม่พบชื่อโปรเจกต์ที่ระบุ)'
             )
     else:
-        print(f'| found ckpt by name: {exp}')
+        print(f'| [INFO] Found ckpt by name (พบโมเดลจากชื่อ): {exp}')
     return exp
 
 
@@ -139,8 +150,8 @@ def acoustic(
         params = [params]
 
     if len(params) == 0:
-        print('The input file is empty.')
-        exit()
+        print('| [ERROR] The input file is empty (ไฟล์ข้อมูลอินพุตว่างเปล่าไม่มีข้อมูลให้ประมวลผล).')
+        sys.exit(-1)
 
     from utils.infer_utils import trans_key, parse_commandline_spk_mix
 
@@ -149,7 +160,7 @@ def acoustic(
         key_suffix = '%+dkey' % key
         if not title:
             name += key_suffix
-        print(f'| key transition: {key:+d}')
+        print(f'| [INFO] Key transition (ปรับระดับคีย์เสียง): {key:+d}')
 
     sys.argv = [
         sys.argv[0],
@@ -162,8 +173,8 @@ def acoustic(
 
     # Check for vocoder path
     assert mel or (root_dir / hparams['vocoder_ckpt']).exists(), \
-        f'Vocoder ckpt \'{hparams["vocoder_ckpt"]}\' not found. ' \
-        f'Please put it to the checkpoints directory to run inference.'
+        f'| [ERROR] Vocoder ckpt \'{hparams["vocoder_ckpt"]}\' not found. ' \
+        f'Please put it to the checkpoints directory to run inference (ไม่พบไฟล์ Vocoder สำหรับแปลงเสียง).'
 
     # For compatibility:
     # migrate timesteps, K_step, K_step_infer, diff_speedup to time_scale_factor, T_start, T_start_infer, sampling_steps
@@ -183,7 +194,7 @@ def acoustic(
 
     if depth is not None:
         assert depth <= 1 - hparams['T_start'], (
-            f"Depth should not be larger than 1 - T_start ({1 - hparams['T_start']})"
+            f"| [ERROR] Depth should not be larger than 1 - T_start ({1 - hparams['T_start']})"
         )
         hparams['K_step_infer'] = round(hparams['timesteps'] * depth)
         hparams['T_start_infer'] = 1 - depth
@@ -207,16 +218,29 @@ def acoustic(
             param['lang'] = lang
 
     from inference.ds_acoustic import DiffSingerAcousticInfer
+    import torch
+    
+    print(f'| [INFO] Initializing Acoustic Inference...')
     infer_ins = DiffSingerAcousticInfer(load_vocoder=not mel, ckpt_steps=ckpt)
-    print(f'| Model: {type(infer_ins.model)}')
+    print(f'| [INFO] Model (ประเภทของโมเดล): {type(infer_ins.model)}')
 
     try:
         infer_ins.run_inference(
             params, out_dir=out, title=name, num_runs=num,
             spk_mix=spk_mix, seed=seed, save_mel=mel
         )
+        print(f'| [SUCCESS] Acoustic inference completed successfully (การประมวลผลเนื้อเสียงสำเร็จเรียบร้อย)')
     except KeyboardInterrupt:
-        exit(-1)
+        print("\n| [WARNING] Acoustic inference interrupted by user (ผู้ใช้งานระงับการทำงานกลางคัน)")
+        sys.exit(-1)
+    except Exception as e:
+        print(f"| [ERROR] Acoustic inference failed (การประมวลผลเสียงล้มเหลว): {e}")
+        traceback.print_exc()
+        sys.exit(-1)
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
 
 @main.command(help='Run DiffSinger variance model inference')
@@ -318,8 +342,8 @@ def variance(
     params = [OrderedDict(p) for p in params]
 
     if len(params) == 0:
-        print('The input file is empty.')
-        exit()
+        print('| [ERROR] The input file is empty (ไฟล์ข้อมูลอินพุตว่างเปล่าไม่มีข้อมูลให้ประมวลผล).')
+        sys.exit(-1)
 
     from utils.infer_utils import trans_key, parse_commandline_spk_mix
 
@@ -328,7 +352,7 @@ def variance(
         key_suffix = '%+dkey' % key
         if not title:
             name += key_suffix
-        print(f'| key transition: {key:+d}')
+        print(f'| [INFO] Key transition (ปรับระดับคีย์เสียง): {key:+d}')
 
     sys.argv = [
         sys.argv[0],
@@ -365,16 +389,29 @@ def variance(
             param['lang'] = lang
 
     from inference.ds_variance import DiffSingerVarianceInfer
+    import torch
+    
+    print(f'| [INFO] Initializing Variance Inference...')
     infer_ins = DiffSingerVarianceInfer(ckpt_steps=ckpt, predictions=set(predict))
-    print(f'| Model: {type(infer_ins.model)}')
+    print(f'| [INFO] Model (ประเภทของโมเดล): {type(infer_ins.model)}')
 
     try:
         infer_ins.run_inference(
             params, out_dir=out, title=name,
             num_runs=num, seed=seed
         )
+        print(f'| [SUCCESS] Variance inference completed successfully (การประมวลผลความแปรปรวนเสียงสำเร็จเรียบร้อย)')
     except KeyboardInterrupt:
-        exit(-1)
+        print("\n| [WARNING] Variance inference interrupted by user (ผู้ใช้งานระงับการทำงานกลางคัน)")
+        sys.exit(-1)
+    except Exception as e:
+        print(f"| [ERROR] Variance inference failed (การประมวลผลเสียงล้มเหลว): {e}")
+        traceback.print_exc()
+        sys.exit(-1)
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
 
 if __name__ == '__main__':

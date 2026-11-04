@@ -1,8 +1,18 @@
+# ==============================================================================
+# Date: 25/10/2026
+# File Name: drop_spk_2.py
+# Version: 1.2
+# Location: Root Directory
+# Credit: Made And Checked By DELTA SYNTH & All Code Agentic AI Engine
+#         Original by DiffSinger Project
+# Description: Refactored with strict error handling and safe exit protocols.
+# ==============================================================================
 import torch
 import argparse
 import pathlib
 import re
-
+import sys
+import traceback
 
 def modify_spk_embed(spk_embed):
     num_spk, hidden_size = spk_embed.shape
@@ -28,7 +38,6 @@ def modify_spk_embed(spk_embed):
     for spk_id, fill in zip(sorted(drop_ids), fill_list):
         spk_embed[spk_id, :] = fill
 
-
 parser = argparse.ArgumentParser(description='Drop or edit spk_embed in a checkpoint.')
 parser.add_argument('input', type=str, help='Path to the input file')
 parser.add_argument('output', type=str, help='Path to the output file')
@@ -44,29 +53,38 @@ parser.add_argument('--fill', type=str, required=False, default='zeros', metavar
 parser.add_argument('--overwrite', required=False, default=False,
                     action='store_true', help='Overwrite if the output file exists.')
 args = parser.parse_args()
+
 assert args.drop is not None or args.retain is not None, 'Either --drop or --retain should be specified.'
+
 if args.drop and not re.fullmatch(r'(\d+)?(,\d+)*,?', args.drop):
-    print(f'Invalid format for --drop: \'{args.drop}\'')
-    exit(-1)
+    print(f"Invalid format for --drop: '{args.drop}'")
+    sys.exit(-1)
 if args.retain and not re.fullmatch(r'(\d+)?(,\d+)*,?', args.retain):
-    print(f'Invalid format for --retain: \'{args.retain}\'')
-    exit(-1)
+    print(f"Invalid format for --retain: '{args.retain}'")
+    sys.exit(-1)
 
-import torch
-input_ckpt = pathlib.Path(args.input).resolve()
-output_ckpt = pathlib.Path(args.output).resolve()
-assert input_ckpt.exists(), 'The input file does not exist.'
-assert args.overwrite or not output_ckpt.exists(), \
-    'The output file already exists or is the same as the input file.\n' \
-    'This is not recommended because spk_embed dropping scripts may not be stable, ' \
-    'and you may be at risk of losing your model.\n' \
-    'If you are sure to OVERWRITE the existing file, please re-run this script with the \'--overwrite\' argument.'
+try:
+    input_ckpt = pathlib.Path(args.input).resolve()
+    output_ckpt = pathlib.Path(args.output).resolve()
+    
+    assert input_ckpt.exists(), 'The input file does not exist.'
+    assert args.overwrite or not output_ckpt.exists(), \
+        'The output file already exists or is the same as the input file.\n' \
+        'This is not recommended because spk_embed dropping scripts may not be stable, ' \
+        'and you may be at risk of losing your model.\n' \
+        'If you are sure to OVERWRITE the existing file, please re-run this script with the \'--overwrite\' argument.'
 
-ckpt_loaded = torch.load(input_ckpt, map_location='cpu')
-state_dict = ckpt_loaded['state_dict']
-if 'model.fs2.spk_embed.weight' in state_dict:
-    modify_spk_embed(state_dict['model.fs2.spk_embed.weight'])
-if 'model.spk_embed.weight' in state_dict:
-    modify_spk_embed(state_dict['model.spk_embed.weight'])
+    ckpt_loaded = torch.load(input_ckpt, map_location='cpu')
+    state_dict = ckpt_loaded['state_dict']
+    
+    if 'model.fs2.spk_embed.weight' in state_dict:
+        modify_spk_embed(state_dict['model.fs2.spk_embed.weight'])
+    if 'model.spk_embed.weight' in state_dict:
+        modify_spk_embed(state_dict['model.spk_embed.weight'])
 
-torch.save(ckpt_loaded, output_ckpt)
+    torch.save(ckpt_loaded, output_ckpt)
+
+except Exception as e:
+    print(f"| [ERROR] Failed to drop/edit spk_embed: {e}")
+    traceback.print_exc()
+    sys.exit(-1)

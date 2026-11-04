@@ -1,0 +1,4 @@
+lang: TH-th
+branch: default
+pl_trainer_devices: auto
+theme: ds_gui.json

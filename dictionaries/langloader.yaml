@@ -1,0 +1,19 @@
+# ==============================================================================
+# File Name: langloader.yaml
+# Version: 1.0
+# Made And Checked By DELTA SYNTH & All Code Agentic AI Engine
+# Original by DiffTrainer
+# Role: DiffTrainer Phoneme Dictionaries & Language Loader Configuration with Thai Support
+# ==============================================================================
+
+dictionaries:
+  zh: opencpop-extension.txt
+  ja: japanese_dict.txt
+  en: arpasing_dict.txt
+  th: thai_dict.txt
+
+extra_phonemes:
+  - SP
+  - AP
+
+merge_list: merge_list.yaml

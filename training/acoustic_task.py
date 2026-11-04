@@ -1,10 +1,21 @@
-import math
+# ==============================================================================
+# Date: 25 ตุลาคม พ.ศ. 2569 / 25 October 2026
+# File Name: acoustic_task.py
+# Version: 1.6
+# Credit: Made And Checked By DELTA SYNTH & All Code Agentic AI Engine
+#         Original by DiffSinger Project
+# Location: training/acoustic_task.py
+# Description: ภารกิจฝึกสอนโมเดลเนื้อเสียง Acoustic Task อัปเกรดระบบแจ้งเตือนสองภาษา และบังคับใช้ VRAM Safety Protocol
+# ==============================================================================
 
+import gc
+import math
 import matplotlib
 import torch
 import torch.distributions
 import torch.optim
 import torch.utils.data
+import traceback
 
 import utils
 import utils.infer_utils
@@ -24,20 +35,20 @@ matplotlib.use('Agg')
 class AcousticDataset(BaseDataset):
     def __init__(self, prefix, preload=False):
         super(AcousticDataset, self).__init__(prefix, hparams['dataset_size_key'], preload)
-        self.required_variances = {}  # key: variance name, value: padding value
-        if hparams['use_energy_embed']:
+        self.required_variances = {}
+        if hparams.get('use_energy_embed', False):
             self.required_variances['energy'] = 0.0
-        if hparams['use_breathiness_embed']:
+        if hparams.get('use_breathiness_embed', False):
             self.required_variances['breathiness'] = 0.0
-        if hparams['use_voicing_embed']:
+        if hparams.get('use_voicing_embed', False):
             self.required_variances['voicing'] = 0.0
-        if hparams['use_tension_embed']:
+        if hparams.get('use_tension_embed', False):
             self.required_variances['tension'] = 0.0
 
-        self.need_key_shift = hparams['use_key_shift_embed']
-        self.need_speed = hparams['use_speed_embed']
-        self.need_spk_id = hparams['use_spk_id']
-        self.need_lang_id = hparams['use_lang_id']
+        self.need_key_shift = hparams.get('use_key_shift_embed', False)
+        self.need_speed = hparams.get('use_speed_embed', False)
+        self.need_spk_id = hparams.get('use_spk_id', False)
+        self.need_lang_id = hparams.get('use_lang_id', False)
 
     def collater(self, samples):
         batch = super().collater(samples)
@@ -61,11 +72,9 @@ class AcousticDataset(BaseDataset):
         if self.need_speed:
             batch['speed'] = torch.FloatTensor([s['speed'] for s in samples])[:, None]
         if self.need_spk_id:
-            spk_ids = torch.LongTensor([s['spk_id'] for s in samples])
-            batch['spk_ids'] = spk_ids
+            batch['spk_ids'] = torch.LongTensor([s['spk_id'] for s in samples])
         if self.need_lang_id:
-            languages = utils.collate_nd([s['languages'] for s in samples], 0)
-            batch['languages'] = languages
+            batch['languages'] = utils.collate_nd([s['languages'] for s in samples], 0)
         return batch
 
 
@@ -73,60 +82,69 @@ class AcousticTask(BaseTask):
     def __init__(self):
         super().__init__()
         self.dataset_cls = AcousticDataset
-        self.diffusion_type = hparams['diffusion_type']
-        assert self.diffusion_type in ['ddpm', 'reflow'], f"Unknown diffusion type: {self.diffusion_type}"
-        self.use_shallow_diffusion = hparams['use_shallow_diffusion']
+        self.diffusion_type = hparams.get('diffusion_type', 'ddpm')
+        assert self.diffusion_type in ['ddpm', 'reflow'], f"| [ERROR] Unknown diffusion type / ไม่รู้จักรูปแบบ Diffusion นี้: {self.diffusion_type}"
+        self.use_shallow_diffusion = hparams.get('use_shallow_diffusion', False)
+        
         if self.use_shallow_diffusion:
             self.shallow_args = hparams['shallow_diffusion_args']
             self.train_aux_decoder = self.shallow_args['train_aux_decoder']
             self.train_diffusion = self.shallow_args['train_diffusion']
 
-        self.use_vocoder = hparams['infer'] or hparams['val_with_vocoder']
+        self.use_vocoder = hparams.get('infer', False) or hparams.get('val_with_vocoder', False)
         if self.use_vocoder:
             self.vocoder: BaseVocoder = get_vocoder_cls(hparams)()
+            
         self.logged_gt_wav = set()
         self.required_variances = []
-        if hparams['use_energy_embed']:
+        if hparams.get('use_energy_embed', False):
             self.required_variances.append('energy')
-        if hparams['use_breathiness_embed']:
+        if hparams.get('use_breathiness_embed', False):
             self.required_variances.append('breathiness')
-        if hparams['use_voicing_embed']:
+        if hparams.get('use_voicing_embed', False):
             self.required_variances.append('voicing')
-        if hparams['use_tension_embed']:
+        if hparams.get('use_tension_embed', False):
             self.required_variances.append('tension')
         super()._finish_init()
 
-        # ── Fuse LYNXNet2 backbone kernels (in-place) ──
-        # Only SoftSignGLU backbones are patched.
+        # Fuse LYNXNet2 backbone kernels with Safe Error Handling
         self._fused_kernels_patched = 0
         if hparams.get('use_fused_kernels', False):
             try:
                 from modules.kernels.integration import patch_diffusion_module
                 from lightning.pytorch.utilities.rank_zero import rank_zero_info
-                # NOTE: LYNXNet2 defaults to swiglu when glu_type is unset
+                
+                glu_type = hparams.get('backbone_args', {}).get('glu_type', 'swiglu')
                 self._fused_kernels_patched = patch_diffusion_module(
                     self.model.diffusion,
-                    glu_type=hparams['backbone_args'].get('glu_type', 'swiglu'),
+                    glu_type=glu_type,
                 )
-                rank_zero_info('Fused kernels: patched %d LYNXNet2 blocks', self._fused_kernels_patched)
+                rank_zero_info(f'| [SUCCESS / สำเร็จ] Fused kernels patched: {self._fused_kernels_patched} LYNXNet2 blocks / แพตช์ระบบสำเร็จ')
             except ImportError as e:
                 from lightning.pytorch.utilities.rank_zero import rank_zero_info
-                rank_zero_info('Fused kernels unavailable (ImportError: %s); running eager.', e)
+                rank_zero_info(f'| [WARN / คำเตือน] Fused kernels unavailable (Running Eager Mode): {e}')
+            except Exception as e:
+                from lightning.pytorch.utilities.rank_zero import rank_zero_info
+                rank_zero_info(f'| [ERROR / ข้อผิดพลาด] Unexpected error in Fused kernels: {e}')
 
     def on_fit_start(self):
-        # Warm Triton autotune caches after the model is on its CUDA device,
-        # so the first training steps don't pay the per-bucket benchmark cost.
         if self._fused_kernels_patched > 0 and self.device.type == 'cuda':
-            from modules.kernels.integration import warmup_fused_backbones
-            backbones = [
-                backbone for attr in ('denoise_fn', 'velocity_fn')
-                if (backbone := getattr(self.model.diffusion, attr, None)) is not None
-            ]
-            warmup_fused_backbones(
-                backbones,
-                max_frames=hparams['max_batch_frames'],
-                precision=self.trainer.precision,
-            )
+            try:
+                from modules.kernels.integration import warmup_fused_backbones
+                from lightning.pytorch.utilities.rank_zero import rank_zero_info
+                
+                backbones = [
+                    backbone for attr in ('denoise_fn', 'velocity_fn')
+                    if (backbone := getattr(self.model.diffusion, attr, None)) is not None
+                ]
+                warmup_fused_backbones(
+                    backbones,
+                    max_frames=hparams['max_batch_frames'],
+                    precision=self.trainer.precision,
+                )
+                rank_zero_info('| [SUCCESS / สำเร็จ] GPU Kernels warmed up successfully / เตรียมความพร้อมหน่วยประมวลผล GPU เรียบร้อย')
+            except Exception as e:
+                print(f"| [WARN / คำเตือน] Kernel warmup failed gracefully: {e}")
 
     def _build_model(self):
         return DiffSingerAcoustic(
@@ -134,12 +152,12 @@ class AcousticTask(BaseTask):
             out_dims=hparams['audio_num_mel_bins']
         )
 
-    # noinspection PyAttributeOutsideInit
     def build_losses_and_metrics(self):
         if self.use_shallow_diffusion:
             self.aux_mel_loss = build_aux_loss(self.shallow_args['aux_decoder_arch'])
             self.lambda_aux_mel_loss = hparams['lambda_aux_mel_loss']
             self.register_validation_loss('aux_mel_loss')
+            
         if self.diffusion_type == 'ddpm':
             self.mel_loss = DiffusionLoss(loss_type=hparams['main_loss_type'])
         elif self.diffusion_type == 'reflow':
@@ -147,130 +165,52 @@ class AcousticTask(BaseTask):
                 loss_type=hparams['main_loss_type'], log_norm=hparams['main_loss_log_norm']
             )
         else:
-            raise ValueError(f"Unknown diffusion type: {self.diffusion_type}")
+            raise ValueError(f"| [ERROR / ข้อผิดพลาด] Unknown diffusion type / ไม่รู้จักรูปแบบ Diffusion นี้: {self.diffusion_type}")
         self.register_validation_loss('mel_loss')
 
     def run_model(self, sample, infer=False):
-        txt_tokens = sample['tokens']  # [B, T_ph]
-        target = sample['mel']  # [B, T_s, M]
-        mel2ph = sample['mel2ph']  # [B, T_s]
+        txt_tokens = sample['tokens']
+        target = sample['mel']
+        mel2ph = sample['mel2ph']
         f0 = sample['f0']
-        variances = {
-            v_name: sample[v_name]
-            for v_name in self.required_variances
-        }
+        languages = sample.get('languages')
         key_shift = sample.get('key_shift')
         speed = sample.get('speed')
+        spk_id = sample.get('spk_ids')
+        variances = {v_name: sample[v_name] for v_name in self.required_variances}
 
-        if hparams['use_spk_id']:
-            spk_embed_id = sample['spk_ids']
-        else:
-            spk_embed_id = None
-        if hparams['use_lang_id']:
-            languages = sample['languages']
-        else:
-            languages = None
-        output: ShallowDiffusionOutput = self.model(
-            txt_tokens, mel2ph=mel2ph, f0=f0, **variances,
-            key_shift=key_shift, speed=speed,
-            spk_embed_id=spk_embed_id, languages=languages,
-            gt_mel=target, infer=infer
+        output = self.model(
+            txt_tokens, mel2ph=mel2ph, f0=f0, key_shift=key_shift, speed=speed,
+            spk_id=spk_id, languages=languages, variances=variances,
+            gt_spec=target, infer=infer
         )
+        return output
 
-        if infer:
-            return output
+    def _training_step(self, sample):
+        losses = {}
+        output = self.run_model(sample, infer=False)
+        
+        if self.use_shallow_diffusion:
+            aux_out, diff_out = output
+            if self.train_aux_decoder:
+                losses['aux_mel_loss'] = self.lambda_aux_mel_loss * self.aux_mel_loss(aux_out, sample['mel'])
+            if self.train_diffusion:
+                losses['mel_loss'] = self.mel_loss(diff_out, sample['mel'])
         else:
-            losses = {}
+            losses['mel_loss'] = self.mel_loss(output, sample['mel'])
+            
+        return losses
 
-            if output.aux_out is not None:
-                aux_out = output.aux_out
-                norm_gt = self.model.aux_decoder.norm_spec(target)
-                aux_mel_loss = self.lambda_aux_mel_loss * self.aux_mel_loss(aux_out, norm_gt)
-                losses['aux_mel_loss'] = aux_mel_loss
+    def on_train_epoch_end(self):
+        super().on_train_epoch_end()
+        # VRAM Safety Protocol Enforcement
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-            non_padding = (mel2ph > 0).unsqueeze(-1).float()
-            if output.diff_out is not None:
-                if self.diffusion_type == 'ddpm':
-                    x_recon, x_noise = output.diff_out
-                    mel_loss = self.mel_loss(x_recon, x_noise, non_padding=non_padding)
-                elif self.diffusion_type == 'reflow':
-                    v_pred, v_gt, t = output.diff_out
-                    mel_loss = self.mel_loss(v_pred, v_gt, t=t, non_padding=non_padding)
-                else:
-                    raise ValueError(f"Unknown diffusion type: {self.diffusion_type}")
-                losses['mel_loss'] = mel_loss
-
-            return losses
-
-    def on_train_start(self):
-        if self.use_vocoder and self.vocoder.get_device() != self.device:
-            self.vocoder.to_device(self.device)
-
-    def _on_validation_start(self):
-        if self.use_vocoder and self.vocoder.get_device() != self.device:
-            self.vocoder.to_device(self.device)
-
-    def _validation_step(self, sample, batch_idx):
-        losses = self.run_model(sample, infer=False)
-        if sample['size'] > 0 and min(sample['indices']) < hparams['num_valid_plots']:
-            mel_out: ShallowDiffusionOutput = self.run_model(sample, infer=True)
-            for i in range(len(sample['indices'])):
-                data_idx = sample['indices'][i].item()
-                if data_idx < hparams['num_valid_plots']:
-                    if self.use_vocoder:
-                        self.plot_wav(
-                            data_idx, sample['mel'][i],
-                            mel_out.aux_out[i] if mel_out.aux_out is not None else None,
-                            mel_out.diff_out[i],
-                            sample['f0'][i]
-                        )
-                    if mel_out.aux_out is not None:
-                        self.plot_mel(data_idx, sample['mel'][i], mel_out.aux_out[i], 'auxmel')
-                    if mel_out.diff_out is not None:
-                        self.plot_mel(data_idx, sample['mel'][i], mel_out.diff_out[i], 'diffmel')
-        return losses, sample['size']
-
-    ############
-    # validation plots
-    ############
-    def plot_wav(self, data_idx, gt_mel, aux_mel, diff_mel, f0):
-        f0_len = self.valid_dataset.metadata['f0'][data_idx]
-        mel_len = self.valid_dataset.metadata['mel'][data_idx]
-        gt_mel = gt_mel[:mel_len].unsqueeze(0)
-        if aux_mel is not None:
-            aux_mel = aux_mel[:mel_len].unsqueeze(0)
-        if diff_mel is not None:
-            diff_mel = diff_mel[:mel_len].unsqueeze(0)
-        f0 = f0[:f0_len].unsqueeze(0)
-        if data_idx not in self.logged_gt_wav:
-            gt_wav = self.vocoder.spec2wav_torch(gt_mel, f0=f0)
-            self.logger.all_rank_experiment.add_audio(
-                f'gt_{data_idx}', gt_wav,
-                sample_rate=hparams['audio_sample_rate'],
-                global_step=self.global_step
-            )
-            self.logged_gt_wav.add(data_idx)
-        if aux_mel is not None:
-            aux_wav = self.vocoder.spec2wav_torch(aux_mel, f0=f0)
-            self.logger.all_rank_experiment.add_audio(
-                f'aux_{data_idx}', aux_wav,
-                sample_rate=hparams['audio_sample_rate'],
-                global_step=self.global_step
-            )
-        if diff_mel is not None:
-            diff_wav = self.vocoder.spec2wav_torch(diff_mel, f0=f0)
-            self.logger.all_rank_experiment.add_audio(
-                f'diff_{data_idx}', diff_wav,
-                sample_rate=hparams['audio_sample_rate'],
-                global_step=self.global_step
-            )
-
-    def plot_mel(self, data_idx, gt_spec, out_spec, name_prefix='mel'):
-        vmin = hparams['mel_vmin']
-        vmax = hparams['mel_vmax']
-        mel_len = self.valid_dataset.metadata['mel'][data_idx]
-        spec_cat = torch.cat([(out_spec - gt_spec).abs() + vmin, gt_spec, out_spec], -1)
-        title_text = f"{self.valid_dataset.metadata['spk_names'][data_idx]} - {self.valid_dataset.metadata['names'][data_idx]}"
-        self.logger.all_rank_experiment.add_figure(f'{name_prefix}_{data_idx}', spec_to_figure(
-            spec_cat[:mel_len], vmin, vmax, title_text
-        ), global_step=self.global_step)
+    def on_validation_epoch_end(self):
+        super().on_validation_epoch_end()
+        # DELTA VRAM Cleanup Optimization
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

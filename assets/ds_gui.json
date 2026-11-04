@@ -1,0 +1,374 @@
+{
+  "CTk": {
+    "fg_color": [
+      "#1A1A1A",
+      "#1A1A1A"
+    ]
+  },
+  "CTkToplevel": {
+    "fg_color": [
+      "#1A1A1A",
+      "#1A1A1A"
+    ]
+  },
+  "CTkFrame": {
+    "corner_radius": 6,
+    "border_width": 1,
+    "fg_color": [
+      "#242424",
+      "#242424"
+    ],
+    "top_fg_color": [
+      "#2A2A2A",
+      "#2A2A2A"
+    ],
+    "border_color": [
+      "#333333",
+      "#333333"
+    ]
+  },
+  "CTkButton": {
+    "corner_radius": 6,
+    "border_width": 0,
+    "fg_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "border_color": [
+      "#991100",
+      "#991100"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#888888",
+      "#888888"
+    ]
+  },
+  "CTkLabel": {
+    "corner_radius": 0,
+    "fg_color": "transparent",
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#888888",
+      "#888888"
+    ]
+  },
+  "CTkEntry": {
+    "corner_radius": 6,
+    "border_width": 2,
+    "fg_color": [
+      "#242424",
+      "#242424"
+    ],
+    "border_color": [
+      "#3D3D3D",
+      "#3D3D3D"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "placeholder_text_color": [
+      "#A0A0A0",
+      "#A0A0A0"
+    ]
+  },
+  "CTkCheckBox": {
+    "corner_radius": 6,
+    "border_width": 3,
+    "fg_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "border_color": [
+      "#444444",
+      "#444444"
+    ],
+    "hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "checkmark_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#666666",
+      "#666666"
+    ]
+  },
+  "CTkSwitch": {
+    "corner_radius": 1000,
+    "border_width": 3,
+    "button_length": 0,
+    "fg_color": [
+      "#444444",
+      "#444444"
+    ],
+    "progress_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "button_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "button_hover_color": [
+      "#FF6644",
+      "#FF6644"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#666666",
+      "#666666"
+    ]
+  },
+  "CTkRadioButton": {
+    "corner_radius": 1000,
+    "border_width_checked": 6,
+    "border_width_unchecked": 3,
+    "fg_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "border_color": [
+      "#444444",
+      "#444444"
+    ],
+    "hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#666666",
+      "#666666"
+    ]
+  },
+  "CTkProgressBar": {
+    "corner_radius": 1000,
+    "border_width": 0,
+    "fg_color": [
+      "#333333",
+      "#333333"
+    ],
+    "progress_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "border_color": [
+      "#222222",
+      "#222222"
+    ]
+  },
+  "CTkSlider": {
+    "corner_radius": 1000,
+    "button_corner_radius": 1000,
+    "border_width": 6,
+    "button_length": 0,
+    "fg_color": [
+      "#333333",
+      "#333333"
+    ],
+    "progress_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "button_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "button_hover_color": [
+      "#FF6644",
+      "#FF6644"
+    ]
+  },
+  "CTkOptionMenu": {
+    "corner_radius": 6,
+    "fg_color": [
+      "#2A2A2A",
+      "#2A2A2A"
+    ],
+    "button_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "button_hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#777777",
+      "#777777"
+    ]
+  },
+  "CTkComboBox": {
+    "corner_radius": 6,
+    "border_width": 2,
+    "fg_color": [
+      "#242424",
+      "#242424"
+    ],
+    "border_color": [
+      "#3D3D3D",
+      "#3D3D3D"
+    ],
+    "button_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "button_hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#777777",
+      "#777777"
+    ]
+  },
+  "CTkScrollbar": {
+    "corner_radius": 1000,
+    "border_spacing": 4,
+    "fg_color": "transparent",
+    "button_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "button_hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ]
+  },
+  "CTkSegmentedButton": {
+    "corner_radius": 6,
+    "border_width": 2,
+    "fg_color": [
+      "#242424",
+      "#242424"
+    ],
+    "selected_color": [
+      "#CC2200",
+      "#CC2200"
+    ],
+    "selected_hover_color": [
+      "#FF4422",
+      "#FF4422"
+    ],
+    "unselected_color": [
+      "#2E2E2E",
+      "#2E2E2E"
+    ],
+    "unselected_hover_color": [
+      "#3E3E3E",
+      "#3E3E3E"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "text_color_disabled": [
+      "#777777",
+      "#777777"
+    ]
+  },
+  "CTkTextbox": {
+    "corner_radius": 6,
+    "border_width": 1,
+    "fg_color": [
+      "#1E1E1E",
+      "#1E1E1E"
+    ],
+    "border_color": [
+      "#333333",
+      "#333333"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ],
+    "scrollbar_button_color": [
+      "#444444",
+      "#444444"
+    ],
+    "scrollbar_button_hover_color": [
+      "#CC2200",
+      "#CC2200"
+    ]
+  },
+  "CTkScrollableFrame": {
+    "label_fg_color": [
+      "#2A2A2A",
+      "#2A2A2A"
+    ]
+  },
+  "DropdownMenu": {
+    "fg_color": [
+      "#242424",
+      "#242424"
+    ],
+    "hover_color": [
+      "#383838",
+      "#383838"
+    ],
+    "text_color": [
+      "#F0F0F0",
+      "#F0F0F0"
+    ]
+  },
+  "CTkFont": {
+    "macOS": {
+      "family": "Leelawadee UI",
+      "size": 13,
+      "weight": "normal"
+    },
+    "Windows": {
+      "family": "Leelawadee UI",
+      "size": 13,
+      "weight": "normal"
+    },
+    "Linux": {
+      "family": "Leelawadee UI",
+      "size": 13,
+      "weight": "normal"
+    }
+  },
+  "provenance": {
+    "theme name": "delta_synth_gui",
+    "theme author": "DELTA SYNTH & All Code Agentic AI Engine",
+    "date created": "November 2 2026",
+    "last modified by": "DELTA SYNTH Code Guardian",
+    "last modified": "November 2 2026",
+    "created with": "DELTA SYNTH Corporate Standard",
+    "keystone colour": "#CC2200",
+    "background colour": "#1A1A1A",
+    "text colour": "#F0F0F0"
+  }
+}

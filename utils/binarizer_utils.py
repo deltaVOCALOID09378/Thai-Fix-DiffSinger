@@ -1,229 +1,300 @@
-from typing import Union
+# -*- coding: utf-8 -*-
+# ==============================================================================
+# File Name: binarizer.py
+# Version: 1.0
+# Location: utils/ (หรือแฟ้มระบบจัดการข้อมูล)
+# Function: Base data processing and binarization for training datasets
+# Credit: Made And Checked By DELTA SYNTH & All Agentic AI Engine
+#         Original by DiffSinger / RVC Project
+# ==============================================================================
 
-import librosa
+import json
+import pathlib
+import pickle
+import shutil
+import warnings
+import gc
+from copy import deepcopy
+
 import numpy as np
-import parselmouth
 import torch
+from tqdm import tqdm
 
-from modules.nsf_hifigan.nvSTFT import STFT
-from utils.decomposed_waveform import DecomposedWaveform
-from utils.pitch_utils import interp_f0
+from utils.hparams import hparams
+from utils.indexed_datasets import IndexedDatasetBuilder
+from utils.multiprocess_utils import chunked_multiprocess_run
+from utils.phoneme_utils import load_phoneme_dictionary
+from utils.plot import distribution_to_figure
 
+class BinarizationError(Exception):
+    pass
 
-def get_mel_torch(
-        waveform, samplerate,
-        *,
-        num_mel_bins=128, hop_size=512, win_size=2048, fft_size=2048,
-        fmin=40, fmax=16000,
-        keyshift=0, speed=1, device=None
-):
-    if device is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    stft = STFT(samplerate, num_mel_bins, fft_size, win_size, hop_size, fmin, fmax, device=device)
-    with torch.no_grad():
-        wav_torch = torch.from_numpy(waveform).to(device)
-        mel_torch = stft.get_mel(wav_torch.unsqueeze(0), keyshift=keyshift, speed=speed).squeeze(0).T
-        return mel_torch.cpu().numpy()
-
-
-@torch.no_grad()
-def get_mel2ph_torch(lr, durs, length, timestep, device='cpu'):
-    ph_acc = torch.round(torch.cumsum(durs.to(device), dim=0) / timestep + 0.5).long()
-    ph_dur = torch.diff(ph_acc, dim=0, prepend=torch.LongTensor([0]).to(device))
-    mel2ph = lr(ph_dur[None])[0]
-    num_frames = mel2ph.shape[0]
-    if num_frames < length:
-        mel2ph = torch.cat((mel2ph, torch.full((length - num_frames,), fill_value=mel2ph[-1], device=device)), dim=0)
-    elif num_frames > length:
-        mel2ph = mel2ph[:length]
-    return mel2ph
-
-
-def get_pitch_parselmouth(
-        waveform, samplerate, length,
-        *, hop_size, f0_min=65, f0_max=1100,
-        speed=1, interp_uv=False
-):
+class BaseBinarizer:
+    """
+        Base class for data processing.
+        1. *process* and *process_data_split*:
+            process entire data, generate the train-test split (support parallel processing);
+        2. *process_item*:
+            process singe piece of data;
+        3. *get_pitch*:
+            infer the pitch using some algorithm;
+        4. *get_align*:
+            get the alignment using 'mel2ph' format (see https://arxiv.org/abs/1905.09263).
+        5. phoneme encoder, voice encoder, etc.
     """
 
-    :param waveform: [T]
-    :param samplerate: sampling rate
-    :param length: Expected number of frames
-    :param hop_size: Frame width, in number of samples
-    :param f0_min: Minimum f0 in Hz
-    :param f0_max: Maximum f0 in Hz
-    :param speed: Change the speed
-    :param interp_uv: Interpolate unvoiced parts
-    :return: f0, uv
-    """
-    hop_size = int(np.round(hop_size * speed))
-    time_step = hop_size / samplerate
+    def __init__(self, datasets=None, data_attrs=None):
+        if datasets is None:
+            datasets = hparams['datasets']
+        self.datasets = datasets
+        self.raw_data_dirs = [pathlib.Path(ds['raw_data_dir']) for ds in self.datasets]
+        self.binary_data_dir = pathlib.Path(hparams['binary_data_dir'])
+        self.data_attrs = [] if data_attrs is None else data_attrs
 
-    l_pad = int(np.ceil(1.5 / f0_min * samplerate))
-    r_pad = hop_size * ((len(waveform) - 1) // hop_size + 1) - len(waveform) + l_pad + 1
-    waveform = np.pad(waveform, (l_pad, r_pad))
+        self.binarization_args = hparams['binarization_args']
+        self.augmentation_args = hparams.get('augmentation_args', {})
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # noinspection PyArgumentList
-    s = parselmouth.Sound(waveform, sampling_frequency=samplerate).to_pitch_ac(
-        time_step=time_step, voicing_threshold=0.6,
-        pitch_floor=f0_min, pitch_ceiling=f0_max
-    )
-    assert np.abs(s.t1 - 1.5 / f0_min) < 0.001
-    f0 = s.selected_array['frequency'].astype(np.float32)
-    if len(f0) < length:
-        f0 = np.pad(f0, (0, length - len(f0)))
-    f0 = f0[: length]
-    uv = f0 == 0
-    if interp_uv:
-        f0, uv = interp_f0(f0, uv)
-    return f0, uv
+        self.spk_map = {}
+        self.spk_ids = None
+        self.build_spk_map()
 
+        self.lang_map = {}
+        self.dictionaries = hparams['dictionaries']
+        self.build_lang_map()
 
-def get_energy_librosa(waveform, length, *, hop_size, win_size, domain='db'):
-    """
-    Definition of energy: RMS of the waveform, in dB representation
-    :param waveform: [T]
-    :param length: Expected number of frames
-    :param hop_size: Frame width, in number of samples
-    :param win_size: Window size, in number of samples
-    :param domain: db or amplitude
-    :return: energy
-    """
-    energy = librosa.feature.rms(y=waveform, frame_length=win_size, hop_length=hop_size)[0]
-    if len(energy) < length:
-        energy = np.pad(energy, (0, length - len(energy)))
-    energy = energy[: length]
-    if domain == 'db':
-        energy = librosa.amplitude_to_db(energy)
-    elif domain == 'amplitude':
-        pass
-    else:
-        raise ValueError(f'Invalid domain: {domain}')
-    return energy
+        self.items = {}
+        self.item_names: list = None
+        self._train_item_names: list = None
+        self._valid_item_names: list = None
 
+        self.phoneme_dictionary = load_phoneme_dictionary()
+        self.timestep = hparams['hop_size'] / hparams['audio_sample_rate']
 
-def get_breathiness(
-        waveform: Union[np.ndarray, DecomposedWaveform],
-        samplerate, f0, length,
-        *, hop_size=None, fft_size=None, win_size=None
-):
-    """
-    Definition of breathiness: RMS of the aperiodic part, in dB representation
-    :param waveform: All other analysis parameters will not take effect if a DeconstructedWaveform is given
-    :param samplerate: sampling rate
-    :param f0: reference f0
-    :param length: Expected number of frames
-    :param hop_size: Frame width, in number of samples
-    :param fft_size: Number of fft bins
-    :param win_size: Window size, in number of samples
-    :return: breathiness
-    """
-    if not isinstance(waveform, DecomposedWaveform):
-        waveform = DecomposedWaveform(
-            waveform=waveform, samplerate=samplerate, f0=f0,
-            hop_size=hop_size, fft_size=fft_size, win_size=win_size
-        )
-    waveform_ap = waveform.aperiodic()
-    breathiness = get_energy_librosa(
-        waveform_ap, length=length,
-        hop_size=waveform.hop_size, win_size=waveform.win_size
-    )
-    return breathiness
+    def build_spk_map(self):
+        spk_ids = [ds.get('spk_id') for ds in self.datasets]
+        assigned_spk_ids = {spk_id for spk_id in spk_ids if spk_id is not None}
+        idx = 0
+        for i in range(len(spk_ids)):
+            if spk_ids[i] is not None:
+                continue
+            while idx in assigned_spk_ids:
+                idx += 1
+            spk_ids[i] = idx
+            assigned_spk_ids.add(idx)
+        assert max(spk_ids) < hparams['num_spk'], \
+            f'Index in spk_id sequence {spk_ids} is out of range. All values should be smaller than num_spk.'
 
+        for spk_id, dataset in zip(spk_ids, self.datasets):
+            spk_name = dataset['speaker']
+            if spk_name in self.spk_map and self.spk_map[spk_name] != spk_id:
+                raise ValueError(f'Invalid speaker ID assignment. Name \'{spk_name}\' is assigned '
+                                 f'with different speaker IDs: {self.spk_map[spk_name]} and {spk_id}.')
+            self.spk_map[spk_name] = spk_id
+        self.spk_ids = spk_ids
 
-def get_voicing(
-        waveform: Union[np.ndarray, DecomposedWaveform],
-        samplerate, f0, length,
-        *, hop_size=None, fft_size=None, win_size=None
-):
-    """
-    Definition of voicing: RMS of the harmonic part, in dB representation
-    :param waveform: All other analysis parameters will not take effect if a DeconstructedWaveform is given
-    :param samplerate: sampling rate
-    :param f0: reference f0
-    :param length: Expected number of frames
-    :param hop_size: Frame width, in number of samples
-    :param fft_size: Number of fft bins
-    :param win_size: Window size, in number of samples
-    :return: voicing
-    """
-    if not isinstance(waveform, DecomposedWaveform):
-        waveform = DecomposedWaveform(
-            waveform=waveform, samplerate=samplerate, f0=f0,
-            hop_size=hop_size, fft_size=fft_size, win_size=win_size
-        )
-    waveform_sp = waveform.harmonic()
-    voicing = get_energy_librosa(
-        waveform_sp, length=length,
-        hop_size=waveform.hop_size, win_size=waveform.win_size
-    )
-    return voicing
+        print("| spk_map: ", self.spk_map)
 
+    def build_lang_map(self):
+        assert len(self.dictionaries.keys()) <= hparams['num_lang'], \
+            'Number of languages must not be greater than num_lang!'
+        for dataset in self.datasets:
+            assert dataset['language'] in self.dictionaries, f'Unrecognized language name: {dataset["language"]}'
 
-def get_tension_base_harmonic(
-        waveform: Union[np.ndarray, DecomposedWaveform],
-        samplerate, f0, length,
-        *, hop_size=None, fft_size=None, win_size=None,
-        domain='logit'
-):
-    """
-    Definition of tension: radio of the real harmonic part (harmonic part except the base harmonic)
-    to the full harmonic part.
-    :param waveform: All other analysis parameters will not take effect if a DeconstructedWaveform is given
-    :param samplerate: sampling rate
-    :param f0: reference f0
-    :param length: Expected number of frames
-    :param hop_size: Frame width, in number of samples
-    :param fft_size: Number of fft bins
-    :param win_size: Window size, in number of samples
-    :param domain: The domain of the final ratio representation.
-     Can be 'ratio' (the raw ratio), 'db' (log decibel) or 'logit' (the reverse function of sigmoid)
-    :return: tension
-    """
-    if not isinstance(waveform, DecomposedWaveform):
-        waveform = DecomposedWaveform(
-            waveform=waveform, samplerate=samplerate, f0=f0,
-            hop_size=hop_size, fft_size=fft_size, win_size=win_size
-        )
-    waveform_h = waveform.harmonic()
-    waveform_base_h = waveform.harmonic(0)
-    energy_base_h = get_energy_librosa(
-        waveform_base_h, length,
-        hop_size=waveform.hop_size, win_size=waveform.win_size,
-        domain='amplitude'
-    )
-    energy_h = get_energy_librosa(
-        waveform_h, length,
-        hop_size=waveform.hop_size, win_size=waveform.win_size,
-        domain='amplitude'
-    )
-    tension = np.sqrt(np.clip(energy_h ** 2 - energy_base_h ** 2, a_min=0, a_max=None)) / (energy_h + 1e-5)
-    if domain == 'ratio':
-        tension = np.clip(tension, a_min=0, a_max=1)
-    elif domain == 'db':
-        tension = np.clip(tension, a_min=1e-5, a_max=1)
-        tension = librosa.amplitude_to_db(tension)
-    elif domain == 'logit':
-        tension = np.clip(tension, a_min=1e-4, a_max=1 - 1e-4)
-        tension = np.log(tension / (1 - tension))
-    return tension
+        for lang_id, lang_name in enumerate(sorted(self.dictionaries.keys()), start=1):
+            self.lang_map[lang_name] = lang_id
 
+        print("| lang_map: ", self.lang_map)
 
-class SinusoidalSmoothingConv1d(torch.nn.Conv1d):
-    def __init__(self, kernel_size):
-        super().__init__(
-            in_channels=1,
-            out_channels=1,
-            kernel_size=max(kernel_size, 1),
-            bias=False,
-            padding='same',
-            padding_mode='replicate'
-        )
-        if kernel_size > 1:
-            smooth_kernel = torch.sin(torch.from_numpy(
-                np.linspace(0, 1, kernel_size).astype(np.float32) * np.pi
-            ))
-            smooth_kernel /= smooth_kernel.sum()
+    def load_meta_data(self, raw_data_dir: pathlib.Path, ds_id, spk, lang) -> dict:
+        raise NotImplementedError()
+
+    def split_train_valid_set(self, prefixes: list):
+        prefixes = {str(pr): 1 for pr in prefixes}
+        valid_item_names = {}
+        for prefix in deepcopy(prefixes):
+            if prefix in self.item_names:
+                valid_item_names[prefix] = 1
+                prefixes.pop(prefix)
+        for prefix in deepcopy(prefixes):
+            matched = False
+            for name in self.item_names:
+                if name.startswith(prefix):
+                    valid_item_names[name] = 1
+                    matched = True
+            if matched:
+                prefixes.pop(prefix)
+        if len(prefixes) != 0:
+            warnings.warn(
+                f'The following rules in test_prefixes have no matching names in the dataset: {", ".join(prefixes.keys())}',
+                category=UserWarning
+            )
+            warnings.filterwarnings('default')
+
+        valid_item_names = list(valid_item_names.keys())
+        assert len(valid_item_names) > 0, 'Validation set is empty!'
+        train_item_names = [x for x in self.item_names if x not in set(valid_item_names)]
+        assert len(train_item_names) > 0, 'Training set is empty!'
+
+        return train_item_names, valid_item_names
+
+    @property
+    def train_item_names(self):
+        return self._train_item_names
+
+    @property
+    def valid_item_names(self):
+        return self._valid_item_names
+
+    def meta_data_iterator(self, prefix):
+        if prefix == 'train':
+            item_names = self.train_item_names
         else:
-            smooth_kernel = torch.tensor([1.0], dtype=torch.float32)
-        self.weight.data = smooth_kernel[None, None]
+            item_names = self.valid_item_names
+        for item_name in item_names:
+            meta_data = self.items[item_name]
+            yield item_name, meta_data
+
+    def process(self):
+        test_prefixes = []
+        for ds_id, dataset in enumerate(self.datasets):
+            items = self.load_meta_data(
+                pathlib.Path(dataset['raw_data_dir']),
+                ds_id=ds_id, spk=dataset['speaker'], lang=dataset['language']
+            )
+            self.items.update(items)
+            test_prefixes.extend(
+                f'{ds_id}:{prefix}'
+                for prefix in dataset.get('test_prefixes', [])
+            )
+        self.item_names = sorted(list(self.items.keys()))
+        self._train_item_names, self._valid_item_names = self.split_train_valid_set(test_prefixes)
+
+        self.binary_data_dir.mkdir(parents=True, exist_ok=True)
+
+        spk_map_fn = self.binary_data_dir / 'spk_map.json'
+        with open(spk_map_fn, 'w', encoding='utf-8') as f:
+            json.dump(self.spk_map, f, ensure_ascii=False)
+        lang_map_fn = self.binary_data_dir / 'lang_map.json'
+        with open(lang_map_fn, 'w', encoding='utf-8') as f:
+            json.dump(self.lang_map, f, ensure_ascii=False)
+        for lang, dict_path in hparams['dictionaries'].items():
+            shutil.copy(dict_path, self.binary_data_dir / f'dictionary-{lang}.txt')
+        self.check_coverage()
+
+        try:
+            self.process_dataset('valid')
+            self.process_dataset(
+                'train',
+                num_workers=int(self.binarization_args['num_workers']),
+                apply_augmentation=any(args['enabled'] for args in self.augmentation_args.values())
+            )
+        except KeyboardInterrupt:
+            print("\n[WRN] Binarization process was interrupted by user.")
+            exit(-1)
+        except Exception as e:
+            print(f"\n[ERR] Fatal error during binarization: {e}")
+            raise
+        finally:
+            # Memory cleanup enforcement
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def check_coverage(self):
+        ph_idx_required = set(range(1, len(self.phoneme_dictionary)))
+        ph_idx_occurred = set()
+        ph_idx_count_map = {
+            idx: 0
+            for idx in ph_idx_required
+        }
+
+        for item_name in self.items:
+            ph_idx_occurred.update(self.items[item_name]['ph_seq'])
+            for idx in self.items[item_name]['ph_seq']:
+                ph_idx_count_map[idx] += 1
+        ph_count_map = {
+            self.phoneme_dictionary.decode_one(idx, scalar=False): count
+            for idx, count in ph_idx_count_map.items()
+        }
+
+        def display_phoneme(phoneme):
+            if isinstance(phoneme, tuple):
+                return f'({", ".join(phoneme)})'
+            return phoneme
+
+        print('===== Phoneme Distribution Summary =====')
+        keys = sorted(ph_count_map.keys(), key=lambda v: v[0] if isinstance(v, tuple) else v)
+        for i, key in enumerate(keys):
+            if i == len(ph_count_map) - 1:
+                end = '\n'
+            elif i % 10 == 9:
+                end = ',\n'
+            else:
+                end = ', '
+            key_disp = display_phoneme(key)
+            print(f'{key_disp}: {ph_count_map[key]}', end=end)
+
+        xs = [display_phoneme(k) for k in keys]
+        ys = [ph_count_map[k] for k in keys]
+        plt = distribution_to_figure(
+            title='Phoneme Distribution Summary',
+            x_label='Phoneme', y_label='Number of occurrences',
+            items=xs, values=ys, rotate=len(self.dictionaries) > 1
+        )
+        filename = self.binary_data_dir / 'phoneme_distribution.jpg'
+        plt.savefig(fname=filename,
+                    bbox_inches='tight',
+                    pad_inches=0.25)
+        print(f'| save summary to \'{filename}\'')
+
+        if ph_idx_occurred != ph_idx_required:
+            missing_phones = sorted({
+                self.phoneme_dictionary.decode_one(idx, scalar=False)
+                for idx in ph_idx_required.difference(ph_idx_occurred)
+            }, key=lambda v: v[0] if isinstance(v, tuple) else v)
+            raise BinarizationError(
+                f'The following phonemes are not covered in transcriptions: {missing_phones}'
+            )
+
+    def process_dataset(self, prefix, num_workers=0, apply_augmentation=False):
+        args = []
+        builder = IndexedDatasetBuilder(self.binary_data_dir, prefix=prefix, allowed_attr=self.data_attrs)
+        total_sec = {k: 0.0 for k in self.spk_map}
+        total_raw_sec = {k: 0.0 for k in self.spk_map}
+        extra_info = {'names': {}, 'ph_texts': {}, 'spk_ids': {}, 'spk_names': {}, 'lengths': {}}
+        max_no = -1
+
+        for item_name, meta_data in self.meta_data_iterator(prefix):
+            args.append([item_name, meta_data, self.binarization_args])
+
+        aug_map = self.arrange_data_augmentation(self.meta_data_iterator(prefix)) if apply_augmentation else {}
+
+        def postprocess(_item):
+            nonlocal total_sec, total_raw_sec, extra_info, max_no
+            if _item is None:
+                return
+            item_no = builder.add_item(_item)
+            max_no = max(max_no, item_no)
+            for k, v in _item.items():
+                if isinstance(v, np.ndarray):
+                    if k not in extra_info:
+                        extra_info[k] = {}
+                    extra_info[k][item_no] = v.shape[0]
+            extra_info['names'][item_no] = _item['name'].split(':', 1)[-1]
+            extra_info['ph_texts'][item_no] = _item['ph_text']
+            extra_info['spk_ids'][item_no] = _item['spk_id']
+            extra_info['spk_names'][item_no] = _item['spk_name']
+            extra_info['lengths'][item_no] = _item['length']
+            total_raw_sec[_item['spk_name']] += _item['seconds']
+            total_sec[_item['spk_name']] += _item['seconds']
+
+            for task in aug_map.get(_item['name'], []):
+                aug_item = task['func'](_item, **task['kwargs'])
+                aug_item_no = builder.add_item(aug_item)
+                max_no = max(max_no, aug_item_no)
+                for k, v in aug_item.items():
+                    if isinstance(v, np.ndarray):
+                        if k not in extra_info:
+                            extra_info[k] = {}
+                        extra

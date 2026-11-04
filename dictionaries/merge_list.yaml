@@ -1,0 +1,9 @@
+# ==============================================================================
+# File Name: merge_list.yaml
+# Version: 1.0
+# Made And Checked By DELTA SYNTH & All Code Agentic AI Engine
+# Original by DiffTrainer
+# Role: DiffTrainer Phoneme Merges Configuration
+# ==============================================================================
+
+merged_phoneme_groups: []

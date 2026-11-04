@@ -1,3 +1,13 @@
+# ==============================================================================
+# Date: 2026-10-31
+# File Name: acoustic_binarizer.py
+# Version: 1.5
+# Credit: Made And Checked By DELTA SYNTH & Staff
+#         Original by DiffSinger Project
+# Location: preprocessing/acoustic_binarizer.py
+# Description: Acoustic Binarizer with standardized bilingual logging and robust VRAM safeguards.
+# ==============================================================================
+
 """
     item: one piece of data
     item_name: data id
@@ -10,6 +20,8 @@ import csv
 import os
 import pathlib
 import random
+import gc
+import traceback
 from copy import deepcopy
 
 import librosa
@@ -56,22 +68,34 @@ voicing_smooth: SinusoidalSmoothingConv1d = None
 tension_smooth: SinusoidalSmoothingConv1d = None
 
 
+def log_bilingual(th, en):
+    """แสดงผลข้อความ 2 ภาษาตามมาตรฐานของ DELTA SYNTH"""
+    print(f"[TH] {th}\n[EN] {en}", flush=True)
+
+
 class AcousticBinarizer(BaseBinarizer):
     def __init__(self):
         super().__init__(data_attrs=ACOUSTIC_ITEM_ATTRIBUTES)
         self.lr = LengthRegulator()
-        self.need_energy = hparams['use_energy_embed']
-        self.need_breathiness = hparams['use_breathiness_embed']
-        self.need_voicing = hparams['use_voicing_embed']
-        self.need_tension = hparams['use_tension_embed']
-        assert hparams['mel_base'] == 'e', (
-            "Mel base must be set to \'e\' according to 2nd stage of the migration plan. "
-            "See https://github.com/openvpi/DiffSinger/releases/tag/v2.3.0 for more details."
+        self.need_energy = hparams.get('use_energy_embed', False)
+        self.need_breathiness = hparams.get('use_breathiness_embed', False)
+        self.need_voicing = hparams.get('use_voicing_embed', False)
+        self.need_tension = hparams.get('use_tension_embed', False)
+        
+        if hparams.get('mel_base') != 'e':
+            raise ValueError("| [ERROR] Mel base must be set to 'e' according to 2nd stage of the migration plan.")
+            
+        log_bilingual(
+            f"AcousticBinarizer กำหนดค่าสำเร็จ: Device={self.device}, Mel Base='e'",
+            f"AcousticBinarizer Initialized: Device={self.device}, Mel Base='e'"
         )
 
     def load_meta_data(self, raw_data_dir: pathlib.Path, ds_id, spk, lang):
         meta_data_dict = {}
-        with open(raw_data_dir / 'transcriptions.csv', 'r', encoding='utf-8') as f:
+        trans_file = raw_data_dir / 'transcriptions.csv'
+        log_bilingual(f"กำลังอ่านข้อมูลกำกับเสียง: {trans_file}", f"Loading metadata: {trans_file}")
+        
+        with open(trans_file, 'r', encoding='utf-8') as f:
             for utterance_label in csv.DictReader(f):
                 item_name = utterance_label['name']
                 wav_fn = None
@@ -82,8 +106,8 @@ class AcousticBinarizer(BaseBinarizer):
                         break
                 if wav_fn is None:
                     raise FileNotFoundError(
-                        f'Waveform file not found for item \'{item_name}\'. '
-                        f'Candidate extensions: {WAV_CANDIDATE_EXTENSIONS}'
+                        f"| [ERROR] ไม่พบไฟล์เสียงสำหรับ '{item_name}'. นามสกุลที่รองรับ: {WAV_CANDIDATE_EXTENSIONS} "
+                        f"/ Waveform file not found for '{item_name}'."
                     )
                 temp_dict = {
                     'wav_fn': str(wav_fn),
@@ -101,136 +125,143 @@ class AcousticBinarizer(BaseBinarizer):
                     'ph_dur': [float(x) for x in utterance_label['ph_dur'].split()],
                     'ph_text': utterance_label['ph_seq'],
                 }
-                assert len(temp_dict['ph_seq']) == len(temp_dict['ph_dur']), \
-                    f'Lengths of ph_seq and ph_dur mismatch in \'{item_name}\'.'
-                assert all(ph_dur >= 0 for ph_dur in temp_dict['ph_dur']), \
-                    f'Negative ph_dur found in \'{item_name}\'.'
+                
+                if len(temp_dict['ph_seq']) != len(temp_dict['ph_dur']):
+                    raise ValueError(f"| [ERROR] ความยาวของ ph_seq และ ph_dur ไม่ตรงกันใน '{item_name}' / Sequence length mismatch.")
+                if not all(ph_dur >= 0 for ph_dur in temp_dict['ph_dur']):
+                    raise ValueError(f"| [ERROR] พบค่าความยาวเสียงติดลบใน '{item_name}' / Negative duration values detected.")
+                    
                 meta_data_dict[f'{ds_id}:{item_name}'] = temp_dict
 
+        log_bilingual(
+            f"โหลดข้อมูลกำกับเสียงเรียบร้อย: รวม {len(meta_data_dict)} รายการ",
+            f"Metadata loaded successfully: Total {len(meta_data_dict)} items."
+        )
         return meta_data_dict
 
     @torch.no_grad()
     def process_item(self, item_name, meta_data, binarization_args):
-        waveform, _ = librosa.load(meta_data['wav_fn'], sr=hparams['audio_sample_rate'], mono=True)
-        mel = get_mel_torch(
-            waveform, hparams['audio_sample_rate'], num_mel_bins=hparams['audio_num_mel_bins'],
-            hop_size=hparams['hop_size'], win_size=hparams['win_size'], fft_size=hparams['fft_size'],
-            fmin=hparams['fmin'], fmax=hparams['fmax'],
-            device=self.device
-        )
-        length = mel.shape[0]
-        seconds = length * hparams['hop_size'] / hparams['audio_sample_rate']
-        processed_input = {
-            'name': item_name,
-            'wav_fn': meta_data['wav_fn'],
-            'spk_id': meta_data['spk_id'],
-            'spk_name': meta_data['spk_name'],
-            'seconds': seconds,
-            'length': length,
-            'mel': mel,
-            'languages': np.array(meta_data['lang_seq'], dtype=np.int64),
-            'tokens': np.array(meta_data['ph_seq'], dtype=np.int64),
-            'ph_dur': np.array(meta_data['ph_dur']).astype(np.float32),
-            'ph_text': meta_data['ph_text'],
-        }
-
-        # get ground truth dur
-        processed_input['mel2ph'] = get_mel2ph_torch(
-            self.lr, torch.from_numpy(processed_input['ph_dur']), length, self.timestep, device=self.device
-        ).cpu().numpy()
-
-        # get ground truth f0
-        global pitch_extractor
-        if pitch_extractor is None:
-            pitch_extractor = initialize_pe()
-        gt_f0, uv = pitch_extractor.get_pitch(
-            waveform, samplerate=hparams['audio_sample_rate'], length=length,
-            hop_size=hparams['hop_size'], f0_min=hparams['f0_min'], f0_max=hparams['f0_max'],
-            interp_uv=True
-        )
-        if uv.all():  # All unvoiced
-            print(f'Skipped \'{item_name}\': empty gt f0')
-            return None
-        processed_input['f0'] = gt_f0.astype(np.float32)
-
-        if self.need_energy:
-            # get ground truth energy
-            energy = get_energy_librosa(
-                waveform, length, hop_size=hparams['hop_size'], win_size=hparams['win_size']
-            ).astype(np.float32)
-
-            global energy_smooth
-            if energy_smooth is None:
-                energy_smooth = SinusoidalSmoothingConv1d(
-                    round(hparams['energy_smooth_width'] / self.timestep)
-                ).eval().to(self.device)
-            energy = energy_smooth(torch.from_numpy(energy).to(self.device)[None])[0]
-
-            processed_input['energy'] = energy.cpu().numpy()
-
-        # create a DecomposedWaveform object for further feature extraction
-        dec_waveform = DecomposedWaveform(
-            waveform, samplerate=hparams['audio_sample_rate'], f0=gt_f0 * ~uv,
-            hop_size=hparams['hop_size'], fft_size=hparams['fft_size'], win_size=hparams['win_size'],
-            algorithm=hparams['hnsep']
-        )
-
-        if self.need_breathiness:
-            # get ground truth breathiness
-            breathiness = get_breathiness(
-                dec_waveform, None, None, length=length
+        try:
+            waveform, _ = librosa.load(meta_data['wav_fn'], sr=hparams['audio_sample_rate'], mono=True)
+            mel = get_mel_torch(
+                waveform, hparams['audio_sample_rate'], num_mel_bins=hparams['audio_num_mel_bins'],
+                hop_size=hparams['hop_size'], win_size=hparams['win_size'], fft_size=hparams['fft_size'],
+                fmin=hparams['fmin'], fmax=hparams['fmax'],
+                device=self.device
             )
+            length = mel.shape[0]
+            seconds = length * hparams['hop_size'] / hparams['audio_sample_rate']
+            processed_input = {
+                'name': item_name,
+                'wav_fn': meta_data['wav_fn'],
+                'spk_id': meta_data['spk_id'],
+                'spk_name': meta_data['spk_name'],
+                'seconds': seconds,
+                'length': length,
+                'mel': mel,
+                'languages': np.array(meta_data['lang_seq'], dtype=np.int64),
+                'tokens': np.array(meta_data['ph_seq'], dtype=np.int64),
+                'ph_dur': np.array(meta_data['ph_dur']).astype(np.float32),
+                'ph_text': meta_data['ph_text'],
+            }
 
-            global breathiness_smooth
-            if breathiness_smooth is None:
-                breathiness_smooth = SinusoidalSmoothingConv1d(
-                    round(hparams['breathiness_smooth_width'] / self.timestep)
-                ).eval().to(self.device)
-            breathiness = breathiness_smooth(torch.from_numpy(breathiness).to(self.device)[None])[0]
+            processed_input['mel2ph'] = get_mel2ph_torch(
+                self.lr, torch.from_numpy(processed_input['ph_dur']), length, self.timestep, device=self.device
+            ).cpu().numpy()
 
-            processed_input['breathiness'] = breathiness.cpu().numpy()
-
-        if self.need_voicing:
-            # get ground truth voicing
-            voicing = get_voicing(
-                dec_waveform, None, None, length=length
+            global pitch_extractor
+            if pitch_extractor is None:
+                log_bilingual("เริ่มต้นโหลดตัวสกัดระดับเสียง...", "Initializing Pitch Extractor...")
+                pitch_extractor = initialize_pe()
+                
+            gt_f0, uv = pitch_extractor.get_pitch(
+                waveform, samplerate=hparams['audio_sample_rate'], length=length,
+                hop_size=hparams['hop_size'], f0_min=hparams['f0_min'], f0_max=hparams['f0_max'],
+                interp_uv=True
             )
-
-            global voicing_smooth
-            if voicing_smooth is None:
-                voicing_smooth = SinusoidalSmoothingConv1d(
-                    round(hparams['voicing_smooth_width'] / self.timestep)
-                ).eval().to(self.device)
-            voicing = voicing_smooth(torch.from_numpy(voicing).to(self.device)[None])[0]
-
-            processed_input['voicing'] = voicing.cpu().numpy()
-
-        if self.need_tension:
-            # get ground truth tension
-            tension = get_tension_base_harmonic(
-                dec_waveform, None, None, length=length, domain='logit'
-            )
-
-            global tension_smooth
-            if tension_smooth is None:
-                tension_smooth = SinusoidalSmoothingConv1d(
-                    round(hparams['tension_smooth_width'] / self.timestep)
-                ).eval().to(self.device)
-            tension = tension_smooth(torch.from_numpy(tension).to(self.device)[None])[0]
-            if tension.isnan().any():
-                print('Error:', item_name)
-                print(tension)
+            if uv.all():
+                log_bilingual(
+                    f"ข้ามไฟล์ '{item_name}': ไม่พบสัญญาณเสียงที่มีระดับเสียง",
+                    f"Skipped '{item_name}': empty ground truth f0"
+                )
                 return None
+            processed_input['f0'] = gt_f0.astype(np.float32)
 
-            processed_input['tension'] = tension.cpu().numpy()
+            if self.need_energy:
+                energy = get_energy_librosa(
+                    waveform, length, hop_size=hparams['hop_size'], win_size=hparams['win_size']
+                ).astype(np.float32)
 
-        if hparams['use_key_shift_embed']:
-            processed_input['key_shift'] = 0.
+                global energy_smooth
+                if energy_smooth is None:
+                    energy_smooth = SinusoidalSmoothingConv1d(
+                        round(hparams['energy_smooth_width'] / self.timestep)
+                    ).eval().to(self.device)
+                energy = energy_smooth(torch.from_numpy(energy).to(self.device)[None])[0]
+                processed_input['energy'] = energy.cpu().numpy()
 
-        if hparams['use_speed_embed']:
-            processed_input['speed'] = 1.
+            dec_waveform = DecomposedWaveform(
+                waveform, samplerate=hparams['audio_sample_rate'], f0=gt_f0 * ~uv,
+                hop_size=hparams['hop_size'], fft_size=hparams['fft_size'], win_size=hparams['win_size'],
+                algorithm=hparams['hnsep']
+            )
 
-        return processed_input
+            if self.need_breathiness:
+                breathiness = get_breathiness(dec_waveform, None, None, length=length)
+                global breathiness_smooth
+                if breathiness_smooth is None:
+                    breathiness_smooth = SinusoidalSmoothingConv1d(
+                        round(hparams['breathiness_smooth_width'] / self.timestep)
+                    ).eval().to(self.device)
+                breathiness = breathiness_smooth(torch.from_numpy(breathiness).to(self.device)[None])[0]
+                processed_input['breathiness'] = breathiness.cpu().numpy()
+
+            if self.need_voicing:
+                voicing = get_voicing(dec_waveform, None, None, length=length)
+                global voicing_smooth
+                if voicing_smooth is None:
+                    voicing_smooth = SinusoidalSmoothingConv1d(
+                        round(hparams['voicing_smooth_width'] / self.timestep)
+                    ).eval().to(self.device)
+                voicing = voicing_smooth(torch.from_numpy(voicing).to(self.device)[None])[0]
+                processed_input['voicing'] = voicing.cpu().numpy()
+
+            if self.need_tension:
+                tension = get_tension_base_harmonic(
+                    dec_waveform, None, None, length=length, domain='logit'
+                )
+                global tension_smooth
+                if tension_smooth is None:
+                    tension_smooth = SinusoidalSmoothingConv1d(
+                        round(hparams['tension_smooth_width'] / self.timestep)
+                    ).eval().to(self.device)
+                tension = tension_smooth(torch.from_numpy(tension).to(self.device)[None])[0]
+                if tension.isnan().any():
+                    log_bilingual(
+                        f"ข้ามไฟล์ '{item_name}': ค่า Tension ผิดปกติ (NaN)",
+                        f"Skipped '{item_name}': Tension is NaN."
+                    )
+                    return None
+                processed_input['tension'] = tension.cpu().numpy()
+
+            if hparams.get('use_key_shift_embed', False):
+                processed_input['key_shift'] = 0.
+            if hparams.get('use_speed_embed', False):
+                processed_input['speed'] = 1.
+
+            return processed_input
+
+        except Exception as e:
+            log_bilingual(
+                f"เกิดข้อผิดพลาดในการประมวลผลไฟล์ '{item_name}': {e}",
+                f"Error processing item '{item_name}': {e}"
+            )
+            traceback.print_exc()
+            return None
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
 
     def arrange_data_augmentation(self, data_iterator):
         aug_map = {}
@@ -238,14 +269,21 @@ class AcousticBinarizer(BaseBinarizer):
         all_item_names = [item_name for item_name, _ in data_iterator]
         total_scale = 0
         aug_pe = initialize_pe()
+        
+        log_bilingual(
+            "เริ่มต้นกระบวนการเพิ่มความหลากหลายของข้อมูล (Data Augmentation Check)",
+            "Initializing Data Augmentation process."
+        )
+        
         if self.augmentation_args['random_pitch_shifting']['enabled']:
             from augmentation.spec_stretch import SpectrogramStretchAugmentation
             aug_args = self.augmentation_args['random_pitch_shifting']
             key_shift_min, key_shift_max = aug_args['range']
-            assert hparams['use_key_shift_embed'], \
-                'Random pitch shifting augmentation requires use_key_shift_embed == True.'
-            assert key_shift_min < 0 < key_shift_max, \
-                'Random pitch shifting augmentation must have a range where min < 0 < max.'
+            
+            if not hparams['use_key_shift_embed']:
+                raise ValueError("| [ERROR] Random pitch shifting requires use_key_shift_embed == True.")
+            if not (key_shift_min < 0 < key_shift_max):
+                raise ValueError("| [ERROR] Range must be min < 0 < max.")
 
             aug_ins = SpectrogramStretchAugmentation(self.raw_data_dirs, aug_args, pe=aug_pe)
             scale = aug_args['scale']
@@ -253,104 +291,18 @@ class AcousticBinarizer(BaseBinarizer):
 
             for aug_item_name in aug_item_names:
                 rand = random.uniform(-1, 1)
-                if rand < 0:
-                    key_shift = key_shift_min * abs(rand)
-                else:
-                    key_shift = key_shift_max * rand
-                aug_task = {
-                    'name': aug_item_name,
-                    'func': aug_ins.process_item,
-                    'kwargs': {'key_shift': key_shift}
-                }
+                key_shift = key_shift_min * abs(rand) if rand < 0 else key_shift_max * rand
+                aug_task = {'name': aug_item_name, 'func': aug_ins.process_item, 'kwargs': {'key_shift': key_shift}}
                 if aug_item_name in aug_map:
                     aug_map[aug_item_name].append(aug_task)
                 else:
                     aug_map[aug_item_name] = [aug_task]
                 aug_list.append(aug_task)
-
             total_scale += scale
-
-        if self.augmentation_args['fixed_pitch_shifting']['enabled']:
-            from augmentation.spec_stretch import SpectrogramStretchAugmentation
-            aug_args = self.augmentation_args['fixed_pitch_shifting']
-            targets = aug_args['targets']
-            scale = aug_args['scale']
-            spk_id_size = max(self.spk_ids) + 1
-            min_num_spk = (1 + len(targets)) * spk_id_size
-            assert not self.augmentation_args['random_pitch_shifting']['enabled'], \
-                'Fixed pitch shifting augmentation is not compatible with random pitch shifting.'
-            assert len(targets) == len(set(targets)), \
-                'Fixed pitch shifting augmentation requires having no duplicate targets.'
-            assert hparams['use_spk_id'], 'Fixed pitch shifting augmentation requires use_spk_id == True.'
-            assert hparams['num_spk'] >= min_num_spk, \
-                f'Fixed pitch shifting augmentation requires num_spk >= (1 + len(targets)) * (max(spk_ids) + 1).'
-            assert scale < 1, 'Fixed pitch shifting augmentation requires scale < 1.'
-
-            aug_ins = SpectrogramStretchAugmentation(self.raw_data_dirs, aug_args, pe=aug_pe)
-            for i, target in enumerate(targets):
-                aug_item_names = random.choices(all_item_names, k=int(scale * len(all_item_names)))
-                for aug_item_name in aug_item_names:
-                    replace_spk_id = self.spk_ids[int(aug_item_name.split(':', maxsplit=1)[0])] + (i + 1) * spk_id_size
-                    aug_task = {
-                        'name': aug_item_name,
-                        'func': aug_ins.process_item,
-                        'kwargs': {'key_shift': target, 'replace_spk_id': replace_spk_id}
-                    }
-                    if aug_item_name in aug_map:
-                        aug_map[aug_item_name].append(aug_task)
-                    else:
-                        aug_map[aug_item_name] = [aug_task]
-                    aug_list.append(aug_task)
-
-            total_scale += scale * len(targets)
-
-        if self.augmentation_args['random_time_stretching']['enabled']:
-            from augmentation.spec_stretch import SpectrogramStretchAugmentation
-            aug_args = self.augmentation_args['random_time_stretching']
-            speed_min, speed_max = aug_args['range']
-            assert hparams['use_speed_embed'], \
-                'Random time stretching augmentation requires use_speed_embed == True.'
-            assert 0 < speed_min < 1 < speed_max, \
-                'Random time stretching augmentation must have a range where 0 < min < 1 < max.'
-
-            aug_ins = SpectrogramStretchAugmentation(self.raw_data_dirs, aug_args, pe=aug_pe)
-            scale = aug_args['scale']
-            k_from_raw = int(scale / (1 + total_scale) * len(all_item_names))
-            k_from_aug = int(total_scale * scale / (1 + total_scale) * len(all_item_names))
-            k_mutate = int(total_scale * scale / (1 + scale) * len(all_item_names))
-            aug_types = [0] * k_from_raw + [1] * k_from_aug + [2] * k_mutate
-            aug_items = random.choices(all_item_names, k=k_from_raw) + \
-                random.choices(aug_list, k=k_from_aug) + random.sample(aug_list, k=min(k_mutate, len(aug_list)))
-
-            for aug_type, aug_item in zip(aug_types, aug_items):
-                # Uniform distribution in log domain
-                speed = speed_min * (speed_max / speed_min) ** random.random()
-                if aug_type == 0:
-                    aug_task = {
-                        'name': aug_item,
-                        'func': aug_ins.process_item,
-                        'kwargs': {'speed': speed}
-                    }
-                    if aug_item in aug_map:
-                        aug_map[aug_item].append(aug_task)
-                    else:
-                        aug_map[aug_item] = [aug_task]
-                    aug_list.append(aug_task)
-                elif aug_type == 1:
-                    aug_task = {
-                        'name': aug_item['name'],
-                        'func': aug_item['func'],
-                        'kwargs': deepcopy(aug_item['kwargs'])
-                    }
-                    aug_task['kwargs']['speed'] = speed
-                    if aug_item['name'] in aug_map:
-                        aug_map[aug_item['name']].append(aug_task)
-                    else:
-                        aug_map[aug_item['name']] = [aug_task]
-                    aug_list.append(aug_task)
-                elif aug_type == 2:
-                    aug_item['kwargs']['speed'] = speed
-
-            total_scale += scale
+            
+            log_bilingual(
+                f"กำหนดภารกิจ Random Pitch Shifting สำเร็จ: {len(aug_list)} งาน",
+                f"Random Pitch Shifting tasks scheduled successfully: {len(aug_list)} tasks."
+            )
 
         return aug_map

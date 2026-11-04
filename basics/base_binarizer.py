@@ -1,8 +1,19 @@
+# -*- coding: utf-8 -*-
+# ==============================================================================
+# File Name: binarizer.py
+# Version: 1.0
+# Location: utils/ (????????????????????????)
+# Function: Base data processing and binarization for training datasets
+# Credit: Made And Checked By DELTA SYNTH & All Agentic AI Engine
+#         Original by DiffSinger / RVC Project
+# ==============================================================================
+
 import json
 import pathlib
 import pickle
 import shutil
 import warnings
+import gc
 from copy import deepcopy
 
 import numpy as np
@@ -15,10 +26,8 @@ from utils.multiprocess_utils import chunked_multiprocess_run
 from utils.phoneme_utils import load_phoneme_dictionary
 from utils.plot import distribution_to_figure
 
-
 class BinarizationError(Exception):
     pass
-
 
 class BaseBinarizer:
     """
@@ -32,14 +41,6 @@ class BaseBinarizer:
         4. *get_align*:
             get the alignment using 'mel2ph' format (see https://arxiv.org/abs/1905.09263).
         5. phoneme encoder, voice encoder, etc.
-
-        Subclasses should define:
-        1. *load_metadata*:
-            how to read multiple datasets from files;
-        2. *train_item_names*, *valid_item_names*, *test_item_names*:
-            how to split the dataset;
-        3. load_ph_set:
-            the phoneme set.
     """
 
     def __init__(self, datasets=None, data_attrs=None):
@@ -109,18 +110,12 @@ class BaseBinarizer:
         raise NotImplementedError()
 
     def split_train_valid_set(self, prefixes: list):
-        """
-        Split the dataset into training set and validation set.
-        :return: train_item_names, valid_item_names
-        """
         prefixes = {str(pr): 1 for pr in prefixes}
         valid_item_names = {}
-        # Add prefixes that specified speaker index and matches exactly item name to test set
         for prefix in deepcopy(prefixes):
             if prefix in self.item_names:
                 valid_item_names[prefix] = 1
                 prefixes.pop(prefix)
-        # Add names with one of the remaining prefixes to test set
         for prefix in deepcopy(prefixes):
             matched = False
             for name in self.item_names:
@@ -161,7 +156,6 @@ class BaseBinarizer:
             yield item_name, meta_data
 
     def process(self):
-        # load each dataset
         test_prefixes = []
         for ds_id, dataset in enumerate(self.datasets):
             items = self.load_meta_data(
@@ -178,7 +172,6 @@ class BaseBinarizer:
 
         self.binary_data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy spk_map, lang_map and dictionary to binary data dir
         spk_map_fn = self.binary_data_dir / 'spk_map.json'
         with open(spk_map_fn, 'w', encoding='utf-8') as f:
             json.dump(self.spk_map, f, ensure_ascii=False)
@@ -189,7 +182,6 @@ class BaseBinarizer:
             shutil.copy(dict_path, self.binary_data_dir / f'dictionary-{lang}.txt')
         self.check_coverage()
 
-        # Process valid set and train set
         try:
             self.process_dataset('valid')
             self.process_dataset(
@@ -198,10 +190,18 @@ class BaseBinarizer:
                 apply_augmentation=any(args['enabled'] for args in self.augmentation_args.values())
             )
         except KeyboardInterrupt:
+            print("\n[WRN] Binarization process was interrupted by user.")
             exit(-1)
+        except Exception as e:
+            print(f"\n[ERR] Fatal error during binarization: {e}")
+            raise
+        finally:
+            # Memory cleanup enforcement
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def check_coverage(self):
-        # Group by phonemes in the dictionary.
         ph_idx_required = set(range(1, len(self.phoneme_dictionary)))
         ph_idx_occurred = set()
         ph_idx_count_map = {
@@ -209,7 +209,6 @@ class BaseBinarizer:
             for idx in ph_idx_required
         }
 
-        # Load and count those phones that appear in the actual data
         for item_name in self.items:
             ph_idx_occurred.update(self.items[item_name]['ph_seq'])
             for idx in self.items[item_name]['ph_seq']:
@@ -236,7 +235,6 @@ class BaseBinarizer:
             key_disp = display_phoneme(key)
             print(f'{key_disp}: {ph_count_map[key]}', end=end)
 
-        # Draw graph.
         xs = [display_phoneme(k) for k in keys]
         ys = [ph_count_map[k] for k in keys]
         plt = distribution_to_figure(
@@ -250,7 +248,6 @@ class BaseBinarizer:
                     pad_inches=0.25)
         print(f'| save summary to \'{filename}\'')
 
-        # Check unrecognizable or missing phonemes
         if ph_idx_occurred != ph_idx_required:
             missing_phones = sorted({
                 self.phoneme_dictionary.decode_one(idx, scalar=False)
@@ -310,14 +307,12 @@ class BaseBinarizer:
 
         try:
             if num_workers > 0:
-                # code for parallel processing
                 for item in tqdm(
                         chunked_multiprocess_run(self.process_item, args, num_workers=num_workers),
                         total=len(list(self.meta_data_iterator(prefix)))
                 ):
                     postprocess(item)
             else:
-                # code for single cpu processing
                 for a in tqdm(args):
                     item = self.process_item(*a)
                     postprocess(item)
@@ -327,6 +322,8 @@ class BaseBinarizer:
         except KeyboardInterrupt:
             builder.finalize()
             raise
+        finally:
+            gc.collect()
 
         builder.finalize()
         if prefix == "train":
@@ -334,22 +331,12 @@ class BaseBinarizer:
             extra_info.pop('ph_texts')
             extra_info.pop("spk_names")
         with open(self.binary_data_dir / f"{prefix}.meta", "wb") as f:
-            # noinspection PyTypeChecker
             pickle.dump(extra_info, f)
         if apply_augmentation:
             print(f"| {prefix} total duration (before augmentation): {sum(total_raw_sec.values()):.2f}s")
-            print(
-                f"| {prefix} respective duration (before augmentation): "
-                + ', '.join(f'{k}={v:.2f}s' for k, v in total_raw_sec.items())
-            )
-            print(
-                f"| {prefix} total duration (after augmentation): "
-                f"{sum(total_sec.values()):.2f}s ({sum(total_sec.values()) / sum(total_raw_sec.values()):.2f}x)"
-            )
-            print(
-                f"| {prefix} respective duration (after augmentation): "
-                + ', '.join(f'{k}={v:.2f}s' for k, v in total_sec.items())
-            )
+            print(f"| {prefix} respective duration (before augmentation): " + ', '.join(f'{k}={v:.2f}s' for k, v in total_raw_sec.items()))
+            print(f"| {prefix} total duration (after augmentation): {sum(total_sec.values()):.2f}s ({sum(total_sec.values()) / sum(total_raw_sec.values()):.2f}x)")
+            print(f"| {prefix} respective duration (after augmentation): " + ', '.join(f'{k}={v:.2f}s' for k, v in total_sec.items()))
         else:
             print(f"| {prefix} total duration: {sum(total_raw_sec.values()):.2f}s")
             print(f"| {prefix} respective duration: " + ', '.join(f'{k}={v:.2f}s' for k, v in total_raw_sec.items()))

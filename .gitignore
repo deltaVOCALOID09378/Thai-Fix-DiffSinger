@@ -13,6 +13,7 @@ infer_out/
 !/checkpoints/.gitkeep
 /venv/
 /artifacts/
-
+desktop.ini
 .vscode
 .ipynb_checkpoints/
+/Thai-Fix-DiffSinger

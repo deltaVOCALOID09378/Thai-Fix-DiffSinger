@@ -1,7 +1,7 @@
 # ชื่อไฟล์โค้ด: python-app.yml
-# เวอร์ชั่นโค้ด: 1.2
+# เวอร์ชั่นโค้ด: 1.3
 # ตำแหน่งที่จะวางไฟล์: .github/workflows/python-app.yml
-# หน้าที่: GitHub Actions workflow รองรับ Cross-Platform (Ubuntu/Windows) พร้อมระบุ Shell Bash เพื่อป้องกัน Syntax Error บน Windows Runner
+# หน้าที่: GitHub Actions workflow รองรับ Cross-Platform ทดสอบเฉพาะ Python 3.10 เพื่อหลีกเลี่ยงปัญหาความเข้ากันได้ของ numba
 # เครดิตผู้สร้าง: Made And Checked By DELTA SYNTH & All Agentic AI
 # Original by GitHub Actions Python Workflow Template
 
@@ -28,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10"] # นำ 3.11 ออกเพื่อป้องกันปัญหา Build Wheel ของ numba 0.56.4
 
     steps:
     - name: Checkout Repository

@@ -1,0 +1,57 @@
+# ชื่อไฟล์โค้ด: python-app.yml
+# เวอร์ชั่นโค้ด: 1.1
+# ตำแหน่งที่จะวางไฟล์: .github/workflows/python-app.yml
+# หน้าที่: GitHub Actions workflow สำหรับจัดการระบบ CI/CD ติดตั้ง dependencies, รันการทดสอบด้วย pytest, ตรวจสอบคุณภาพโค้ดด้วย flake8 พร้อมรองรับการแคชและระบบปฏิบัติการที่หลากหลาย
+# เครดิตผู้สร้าง: Made And Checked By DELTA SYNTH & All Agentic AI
+# Original by GitHub Actions Python Workflow Template
+
+name: Python Application CI/CD
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11"]
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Upgrade Pip & Install Core Tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade setuptools wheel flake8 pytest
+
+    - name: Install Project Dependencies
+      run: |
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Lint with Flake8
+      run: |
+        # Stop the build if there are Python syntax errors or undefined names
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Run Tests with Pytest
+      run: |
+        pytest
